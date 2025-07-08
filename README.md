@@ -3,7 +3,7 @@
 This repository contains the Python source code accompanying the research paper:
 
 **Title**: *Quantum k-Means Clustering Using Fidelity and Control Rotation*  
-**Authors**: Shahin Torabi, [Other Authors' Names]  
+**Authors**: Shahin Torabi, MohammadHadi Allayean  
 **Date**: 2025
 
 ## 🧠 Project Description
