@@ -4,7 +4,7 @@ from qiskit_aer import AerSimulator
 from qiskit.visualization import circuit_drawer
 
 from qiskit.circuit.library import MCMT, RYGate
-from sklearn.datasets import make_blobs, make_moons, load_iris, load_wine, load_diabetes
+from sklearn.datasets import make_blobs, make_moons, load_iris, load_wine, load_diabetes, load_breast_cancer, load_digits
 from sklearn.preprocessing import StandardScaler, Normalizer
 import matplotlib.pyplot as plt
 from sklearn.metrics import v_measure_score, silhouette_score, adjusted_rand_score, normalized_mutual_info_score, \
@@ -14,6 +14,12 @@ import time
 from scipy.stats import mode
 from sklearn.decomposition import PCA
 import math
+from qiskit_aer.noise import (
+    NoiseModel, 
+    depolarizing_error, 
+    thermal_relaxation_error, 
+    ReadoutError
+)
 
 
 def init_centroids(data, k):
@@ -58,11 +64,64 @@ def hadamard_test(qc, record_qubit, centroid_qubit, ancilla_qubit, theta):
     """Performs the Hadamard test using Angle Encoding."""
     qc.h(ancilla_qubit)
 
-    qc.cry(theta, ancilla_qubit, record_qubit)
+    qc.cry(-theta, ancilla_qubit, record_qubit)
 
     qc.h(ancilla_qubit)
+   
+from qiskit_aer import AerSimulator
+from qiskit_aer.noise import (
+    NoiseModel,
+    depolarizing_error,
+    thermal_relaxation_error,
+    ReadoutError,
+)
 
+def get_noisy_backend_for_kmeans():
 
+    noise_model = NoiseModel()
+
+    # ---- Depolarizing gate errors (REDUCED) ----
+    # before: 0.001 / 0.01
+    p1q = 0.0005      # mild single-qubit noise
+    p2q = 0.005       # mild CX noise (MOST IMPORTANT)
+
+    error_1q = depolarizing_error(p1q, 1)
+    error_2q = depolarizing_error(p2q, 2)
+
+    single_qubit = ['rz', 'sx', 'x', 'h', 'ry']
+    two_qubit = ['cx']
+
+    noise_model.add_all_qubit_quantum_error(error_1q, single_qubit)
+    noise_model.add_all_qubit_quantum_error(error_2q, two_qubit)
+
+    # ---- Thermal relaxation (WEAKER EFFECT) ----
+    # increase coherence relative to gate duration
+    t1, t2 = 200e3, 160e3   # longer coherence times
+    gate_time_1q = 45        # faster gates
+    gate_time_2q = 220
+
+    relax_1q = thermal_relaxation_error(t1, t2, gate_time_1q)
+    relax_single = thermal_relaxation_error(t1, t2, gate_time_2q)
+    relax_2q = relax_single.tensor(relax_single)
+
+    noise_model.add_all_qubit_quantum_error(relax_1q, single_qubit)
+    noise_model.add_all_qubit_quantum_error(relax_2q, two_qubit)
+
+    # ---- Readout error (REDUCED) ----
+    # before: 2%
+    p_flip = 0.008
+
+    readout = ReadoutError([
+        [1 - p_flip, p_flip],
+        [p_flip, 1 - p_flip]
+    ])
+
+    noise_model.add_all_qubit_readout_error(readout)
+
+    return AerSimulator(
+        method="density_matrix",
+        noise_model=noise_model
+    )
 
 def distance_circuit_qf(record, centroid, shots=8192):
     """Computes the quantum distance between a record and a centroid using multiple ancillas."""
@@ -88,12 +147,15 @@ def distance_circuit_qf(record, centroid, shots=8192):
         hadamard_test(qc, record_qreg[i], centroid_qreg[i], ancilla_qreg[i], theta)
 
     qc.measure(ancilla_qreg, creg)
+    
 
-    simulator = AerSimulator()
+
+    simulator = get_noisy_backend_for_kmeans()
+    #simulator = AerSimulator()
     transpiled_qc = transpile(qc, simulator, optimization_level=3)
     result = simulator.run(transpiled_qc, shots=shots).result()
     counts = result.get_counts()
-
+    
     total_prob_0 = 0
     for outcome, count in counts.items():
 
@@ -162,7 +224,7 @@ def k_means(data, k):
 
 def generate_blobs():
     """Generate synthetic blobs(blobs) data for clustering."""
-    data, ground_cluster = make_blobs(n_samples=23, n_features=3, cluster_std=1.0, random_state=42)
+    data, ground_cluster = make_blobs(n_samples=800, n_features=4, cluster_std=1.0, random_state=42)
     return data, ground_cluster
 
 
@@ -185,6 +247,30 @@ def generate_aniso():
 
     data = np.dot(data, transformation_matrix.T)
     return data, ground_cluster
+
+def generate_digits():
+        
+    dataset = load_digits()
+    data, targets = dataset.data, dataset.target
+    data = PCA(n_components=3).fit_transform(data)
+    return data, targets
+
+
+from sklearn.datasets import load_breast_cancer
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+def generate_breast_cancer():
+    """Generate Breast Cancer dataset for clustering."""
+    
+    # Load dataset
+    dataset = load_breast_cancer()
+    points = dataset.data          # shape (569, 30)
+    targets = dataset.target       # 0 = malignant, 1 = benign
+
+    reduced_points = PCA(n_components=4).fit_transform(points)
+
+    return reduced_points, targets
 
 
 def generate_iris():
@@ -302,13 +388,16 @@ def test_qk_means():
     from evaluation import evaluate_algorithms_
     """Test quantum k-means algorithm"""
     data_sets = {
-        'diabetes':generate_diabetes(),
-        'wine':generate_wine(),
-        'blobs': generate_blobs(),
-         'nisy':noisy_iris(),
-         'moon': generate_moons(),
-        'aniso': generate_aniso(),
-        'iris': generate_iris(),
+        #'diabetes':generate_diabetes(),
+        #'breast cancer wisconsin':generate_breast_cancer(),
+         'wine':generate_wine(),
+         #'blobs': generate_blobs(),
+        #  'nisy':noisy_iris(),
+        #  'moon': generate_moons(),
+        # 'aniso': generate_aniso(),
+        #'digits':generate_digits(),
+        #'diabetes':generate_diabetes(),
+        #'iris': generate_iris(),
 
     }
     scaler = StandardScaler()
