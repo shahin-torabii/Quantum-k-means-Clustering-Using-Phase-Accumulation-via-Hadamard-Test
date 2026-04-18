@@ -8,7 +8,7 @@ from sklearn.datasets import make_blobs, make_moons, load_iris, load_wine, load_
 from sklearn.preprocessing import StandardScaler, Normalizer
 import matplotlib.pyplot as plt
 from sklearn.metrics import v_measure_score, silhouette_score, adjusted_rand_score, normalized_mutual_info_score, \
-    davies_bouldin_score, homogeneity_score, adjusted_mutual_info_score, completeness_score
+    davies_bouldin_score, homogeneity_score, adjusted_mutual_info_score, completeness_score, accuracy_score
 from sklearn.cluster import KMeans
 import time
 from scipy.stats import mode
@@ -20,6 +20,19 @@ from qiskit_aer.noise import (
     thermal_relaxation_error, 
     ReadoutError
 )
+from qiskit_ibm_runtime.fake_provider import FakeGuadalupeV2
+from scipy.optimize import linear_sum_assignment
+import logging
+import random
+
+
+
+
+logging.getLogger('qiskit_aer').setLevel(logging.ERROR)
+logging.getLogger('qiskit').setLevel(logging.ERROR)
+
+np.random.seed(42)
+random.seed(42)
 
 
 def init_centroids(data, k):
@@ -41,8 +54,8 @@ def normalize(data):
     return data / norm if norm != 0 else data
 
 
-# Function to create a controlled multi-qubit Ry rotation
 def cnry(qc, theta, controls, target):
+    """ Function to create a controlled multi-qubit Ry rotation"""
     n = len(controls)
     if n == 1:
         qc.cry(2 * theta, controls[0], target)
@@ -67,14 +80,7 @@ def hadamard_test(qc, record_qubit, centroid_qubit, ancilla_qubit, theta):
     qc.cry(-theta, ancilla_qubit, record_qubit)
 
     qc.h(ancilla_qubit)
-   
-from qiskit_aer import AerSimulator
-from qiskit_aer.noise import (
-    NoiseModel,
-    depolarizing_error,
-    thermal_relaxation_error,
-    ReadoutError,
-)
+ 
 
 def get_noisy_backend_for_kmeans():
 
@@ -120,10 +126,11 @@ def get_noisy_backend_for_kmeans():
 
     return AerSimulator(
         method="density_matrix",
-        noise_model=noise_model
+        noise_model=noise_model,
+        seed_simulator=42
     )
 
-def distance_circuit_qf(record, centroid, shots=8192):
+def distance_circuit_qf(record, centroid, shots=32):
     """Computes the quantum distance between a record and a centroid using multiple ancillas."""
     n_data_qubits = len(record)  # Number of qubits required for data
 
@@ -148,13 +155,18 @@ def distance_circuit_qf(record, centroid, shots=8192):
 
     qc.measure(ancilla_qreg, creg)
     
-
-
     simulator = get_noisy_backend_for_kmeans()
     #simulator = AerSimulator()
-    transpiled_qc = transpile(qc, simulator, optimization_level=3)
+    backend = FakeGuadalupeV2()
+    transpiled_qc = transpile(qc, simulator,backend, optimization_level=3, seed_transpiler=42)
     result = simulator.run(transpiled_qc, shots=shots).result()
+    print(transpiled_qc.depth())
+    exit()
     counts = result.get_counts()
+
+
+    ###################real backedn##############
+
     
     total_prob_0 = 0
     for outcome, count in counts.items():
@@ -166,6 +178,7 @@ def distance_circuit_qf(record, centroid, shots=8192):
     distance = np.sqrt(2 - 2 * average_overlap)
     print(f"Computed quantum distance: {distance}")
     return distance
+
 def has_converged(old_centroids, new_centroids, threshold=0.0001):
     """Check if centroids have converged"""
     return np.linalg.norm(np.array(old_centroids) - np.array(new_centroids), ord='fro') <= threshold
@@ -221,6 +234,37 @@ def k_means(data, k):
 
     return labels, centroids
 
+def hungarian_cluster_mapping(y_true, y_pred):
+    """
+    Uses Hungarian algorithm to find optimal 1-to-1 mapping
+    between cluster labels and ground-truth labels.
+    """
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    # get unique labels
+    true_labels = np.unique(y_true)
+    pred_labels = np.unique(y_pred)
+
+    # build cost matrix (negative overlap for maximization)
+    cost_matrix = np.zeros((len(pred_labels), len(true_labels)))
+
+    for i, p in enumerate(pred_labels):
+        for j, t in enumerate(true_labels):
+            cost_matrix[i, j] = -np.sum((y_pred == p) & (y_true == t))
+
+    # Hungarian algorithm (minimize cost → maximize correct matches)
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    # create mapping
+    mapping = {pred_labels[row]: true_labels[col] for row, col in zip(row_ind, col_ind)}
+
+    # relabel predictions
+    new_labels = np.array([mapping[label] for label in y_pred])
+
+    return new_labels, mapping
+
 
 def generate_blobs():
     """Generate synthetic blobs(blobs) data for clustering."""
@@ -230,7 +274,7 @@ def generate_blobs():
 
 def generate_moons():
     """Generate synthetic data(noisy moon) for clustering."""
-    points, ground_cluster = make_moons(n_samples=267, noise=.1, random_state=42)
+    points, ground_cluster = make_moons(n_samples=800, noise=1.2, random_state=42)
     return points, ground_cluster
 
 
@@ -390,10 +434,10 @@ def test_qk_means():
     data_sets = {
         #'diabetes':generate_diabetes(),
         #'breast cancer wisconsin':generate_breast_cancer(),
-         'wine':generate_wine(),
-         #'blobs': generate_blobs(),
-        #  'nisy':noisy_iris(),
-        #  'moon': generate_moons(),
+         #'wine':generate_wine(),
+         'blobs': generate_blobs(),
+        #'nisy':noisy_iris(),
+        # 'moon': generate_moons(),
         # 'aniso': generate_aniso(),
         #'digits':generate_digits(),
         #'diabetes':generate_diabetes(),
@@ -407,14 +451,24 @@ def test_qk_means():
         data_points = normalizer.fit_transform(data_points)
         k = len(set(ground_truth))
         kmean_labels, kmean_centroids = k_means(data_points, k)
-        label_list, centroids, clusters, evaluations = qk_means(data_points, k, sc_thresh=.0001,
-                                                                ground_truth=ground_truth, kmena_labels=kmean_labels,
-                                                                v_measure=True)
+        for i in range(10):
+            label_list, centroids, clusters, evaluations = qk_means(data_points, k, sc_thresh=.0001,
+                                                                    ground_truth=ground_truth, kmena_labels=kmean_labels,
+                                                                    v_measure=True)
 
-        print('evaluations for dataset ' + dataset_name)
-        print(evaluations)
-        evaluate_algorithms_(dataset_name, kmean_labels, label_list, ground_truth)
-        visualize_clusters(data_points, label_list, centroids, dataset_name)
+            print('evaluations for dataset ' + dataset_name)
+            print(evaluations)
+            aligned_kmeans, km_map = hungarian_cluster_mapping(ground_truth, kmean_labels)
+            aligned_qkmeans, qkm_map = hungarian_cluster_mapping(ground_truth, label_list)
+
+            print("KMeans accuracy (Hungarian):", accuracy_score(ground_truth, aligned_kmeans))
+            print("QKMeans accuracy (Hungarian):", accuracy_score(ground_truth, aligned_qkmeans))
+
+            evaluate_algorithms_(dataset_name, aligned_kmeans, aligned_qkmeans, ground_truth)
+            #visualize_clusters(data_points, label_list, centroids, dataset_name)
+
+            print(f"experiment {i}")
+            #visualize_clusters(data_points, label_list, centroids, dataset_name)
 
 if __name__ == "__main__":
     start_time = time.time()

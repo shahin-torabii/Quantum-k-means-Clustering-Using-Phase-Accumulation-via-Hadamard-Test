@@ -4,15 +4,31 @@ from qiskit_aer import AerSimulator
 from qiskit.visualization import circuit_drawer
 
 from qiskit.circuit.library import MCMT, RYGate, QFT
-from sklearn.datasets import make_blobs, make_moons, load_iris, load_wine
+from sklearn.datasets import make_blobs, make_moons, load_iris, load_wine, load_breast_cancer
 from sklearn.preprocessing import StandardScaler, Normalizer
 import matplotlib.pyplot as plt
-from sklearn.metrics import v_measure_score, silhouette_score, adjusted_rand_score
+from sklearn.metrics import v_measure_score, silhouette_score, adjusted_rand_score, normalized_mutual_info_score, \
+    davies_bouldin_score, homogeneity_score, adjusted_mutual_info_score, completeness_score, accuracy_score
 from sklearn.cluster import KMeans
 import time
 from scipy.stats import mode
 from sklearn.decomposition import PCA
 import math
+import warnings
+from scipy.optimize import linear_sum_assignment
+import logging
+logging.getLogger('qiskit_aer').setLevel(logging.ERROR)
+logging.getLogger('qiskit').setLevel(logging.ERROR)
+import random
+from qiskit_aer.noise import (
+    NoiseModel,
+    depolarizing_error,
+    thermal_relaxation_error,
+    ReadoutError,
+)
+np.random.seed(42)
+random.seed(42)
+
 
 
 def init_centroids(data, k):
@@ -65,22 +81,31 @@ def inverse_qft(qc, qreg):
 
 # QFT-based multiplication
 def qft_multiplication(qc, qreg_a, qreg_b, qreg_result):
+    """
+    Multiply qreg_a × qreg_b into qreg_result using Draper's adder.
+    """
     n = len(qreg_a)
     m = len(qreg_result)
     if m < 2 * n:
-        raise ValueError("Result register too small")
-    for i in range(n):
-        slice_start = i
-        slice_end = i + n
-        if slice_end > m:
+        raise ValueError("qreg_result must be at least 2n")
+
+    for i in range(n):  # For each bit a[i]
+        # Shifted slice of qreg_result
+        slice_qs = qreg_result[i:i+n]
+        if len(slice_qs) < n:
             continue
-        slice_qs = qreg_result[slice_start:slice_end]
+
+        # Shifted b: we use qreg_b controlled on a[i]
+        # Apply Draper's adder controlled on a[i]
         qft(qc, slice_qs)
-        for j in range(n):
-            if slice_start + j < m:
-                theta = 2 * np.pi / (2 ** (j + 1))
-                qc.cp(theta, qreg_b[j], qreg_result[slice_start + j])
+        for k in range(n):
+            for j in range(k + 1):
+                theta = 2 * np.pi / (2 ** (k - j + 1))
+                # Controlled on a[i] AND b[j]
+                qc.mcp(theta, [qreg_a[i], qreg_b[j]], slice_qs[k])
         inverse_qft(qc, slice_qs)
+
+
 
 def draper_qft_addition(qc, qreg_sum, qreg_add):
     n = len(qreg_sum)
@@ -91,56 +116,173 @@ def draper_qft_addition(qc, qreg_sum, qreg_add):
             qc.cp(theta, qreg_add[j], qreg_sum[i])
     inverse_qft(qc, qreg_sum)
 
+
+# -----------------------------
+# Controlled Draper QFT Adder
+# -----------------------------
+def controlled_draper_qft_addition(qc, control, qreg_sum, qreg_add):
+
+
+    n = len(qreg_sum)
+
+    # Step 1: QFT
+    qft(qc, qreg_sum)
+
+    # Step 2: Controlled phase rotations
+    for i in range(n-1):
+        for j in range(i + 1):
+            theta = 2 * np.pi / (2 ** (i - j + 1))    
+            # Apply phase only if (control AND qreg_add[j]) == 1
+            qc.mcp(theta, [control, qreg_add[j]], qreg_sum[i])
+
+    # Step 3: inverse QFT
+    inverse_qft(qc, qreg_sum)
+
+
+# -----------------------------
+# Absolute Value (Two’s Complement)
+# -----------------------------
+def quantum_abs(qc, qreg, one):
+    """
+    Computes |x| in-place assuming two's complement encoding.
+
+    qreg : input register (modified in-place)
+    one  : auxiliary register encoding |1⟩ (same size as qreg)
+    """
+
+    n = len(qreg)
+    sign = qreg[n - 1]  # MSB
+
+    # Step 1: Conditional bit flip (invert all bits if negative)
+    for i in range(n -  1):
+        qc.cx(sign, qreg[i])
+
+    # Step 2: Conditional +1 (two’s complement)
+    controlled_draper_qft_addition(qc, sign, qreg, one)
+def get_noisy_backend_for_kmeans():
+
+    noise_model = NoiseModel()
+
+    # ---- Depolarizing gate errors (REDUCED) ----
+    # before: 0.001 / 0.01
+    p1q = 0.0005      # mild single-qubit noise
+    p2q = 0.005       # mild CX noise (MOST IMPORTANT)
+
+    error_1q = depolarizing_error(p1q, 1)
+    error_2q = depolarizing_error(p2q, 2)
+
+    single_qubit = ['rz', 'sx', 'x', 'h', 'ry']
+    two_qubit = ['cx']
+
+    noise_model.add_all_qubit_quantum_error(error_1q, single_qubit)
+    noise_model.add_all_qubit_quantum_error(error_2q, two_qubit)
+
+    # ---- Thermal relaxation (WEAKER EFFECT) ----
+    # increase coherence relative to gate duration
+    t1, t2 = 200e3, 160e3   # longer coherence times
+    gate_time_1q = 45        # faster gates
+    gate_time_2q = 220
+
+    relax_1q = thermal_relaxation_error(t1, t2, gate_time_1q)
+    relax_single = thermal_relaxation_error(t1, t2, gate_time_2q)
+    relax_2q = relax_single.tensor(relax_single)
+
+    noise_model.add_all_qubit_quantum_error(relax_1q, single_qubit)
+    noise_model.add_all_qubit_quantum_error(relax_2q, two_qubit)
+
+    # ---- Readout error (REDUCED) ----
+    # before: 2%
+    p_flip = 0.008
+
+    readout = ReadoutError([
+        [1 - p_flip, p_flip],
+        [p_flip, 1 - p_flip]
+    ])
+
+    noise_model.add_all_qubit_readout_error(readout)
+
+    return AerSimulator(
+        method='matrix_product_state',
+        noise_model=noise_model,
+        seed_simulator=42
+    )
+
 def distance_circuit_qft(record, centroid, f=2, shots=8192):
-    scale = 2 ** f
-    r_int = round(record[0] * scale)
-    c_int = round(centroid[0] * scale)
-    n = max(len(bin(max(r_int, c_int))[2:]), f + 1)
-    m = 2 * n
+    """
+    Compute Euclidean distance over all dimensions using
+    repeated 1D QFT distance circuits.
+    """
 
-    qr = QuantumRegister(n, "record")      # |a⟩
-    qd = QuantumRegister(n, "d_copy")      # |b⟩
-    qsq = QuantumRegister(m, "square")     # |r⟩
-    qs = QuantumRegister(m, "sum")         # accumulation register
-    cr = ClassicalRegister(m, "c")         # classical bits
-    qc = QuantumCircuit(qr, qd, qsq, qs, cr)
+    total_expectation = 0
 
-    # Encode |a⟩ = record (r_int)
-    for i, bit in enumerate(format(r_int, f'0{n}b')[::-1]):
-        if bit == '1':
-            qc.x(qr[i])
+    for dim in range(len(record)):
+        # --- SAME CODE AS BEFORE, BUT PER DIMENSION ---
+        scale = 2 ** f
+        r_int = round(record[dim] * scale)
+        c_int = round(centroid[dim] * scale)
 
-    # QFT subtraction: qr = r - c
-    qft(qc, qr)
-    for i in range(n):
-        b_i = (c_int >> i) & 1
-        if b_i:
-            theta = -2 * np.pi / (2 ** (i + 1))
-            qc.rz(theta, qr[i])
-    inverse_qft(qc, qr)
+        n = max(len(bin(max(r_int, c_int))[2:]), f + 1)
+        m = 2 * n
 
-    for i in range(n):
-        qc.cx(qr[i], qd[i])
+        qr = QuantumRegister(n, "record")
+        qcen = QuantumRegister(n, "centroid")
+        qd = QuantumRegister(n, "d_copy")
+        qsq = QuantumRegister(m, "square")
+        qs = QuantumRegister(m, "sum")
+        one = QuantumRegister(n, "one")
+        cr = ClassicalRegister(m, "c")
 
-    # QFT multiplication: qr * qd -> qsq
-    qft_multiplication(qc, qr, qd, qsq)
+        qc = QuantumCircuit(qr, qd, qsq, qs, one, cr, qcen)
 
-    # Use Draper's QFT addition: qs += qsq
-    draper_qft_addition(qc, qs, qsq)
+        # Encode record
+        for i, bit in enumerate(format(r_int, f'0{n}b')[::-1]):
+            if bit == '1':
+                qc.x(qr[i])
 
-    qc.measure(qs[::-1], cr)
+        # Encode centroid
+        for i, bit in enumerate(format(c_int, f'0{n}b')[::-1]):
+            if bit == '1':
+                qc.x(qcen[i])
 
-    backend = AerSimulator()
-    qc = transpile(qc, backend=backend)
-    result = backend.run(qc, shots=shots).result()
-    counts = result.get_counts()
+        # --- QFT subtraction ---
+        qft(qc, qr)
+        for i in range(n):
+            for j in range(i + 1):
+                if (c_int >> j) & 1:
+                    theta = -2 * np.pi / (2 ** (i - j + 1))
+                    qc.cp(theta, qr[i], qcen[i])
+        inverse_qft(qc, qr)
 
-    expectation = 0
-    for key, count in counts.items():
-        val = int(key, 2) / (scale ** 2)
-        expectation += val * (count / shots)
-    distance = np.sqrt(expectation)
+        # --- ABS ---
+        qc.x(one[0])
+        quantum_abs(qc, qr, one)
 
+        # --- Copy ---
+        for i in range(n):
+            qc.cx(qr[i], qd[i])
+
+        # --- Square ---
+        qft_multiplication(qc, qr, qd, qsq)
+
+        # --- Accumulate ---
+        draper_qft_addition(qc, qs, qsq)
+
+        qc.measure(qs[::-1], cr)
+
+        # --- Run ---
+        simulator = AerSimulator() # IMPORTANT
+        transpiled_qc = transpile(qc, optimization_level=3)
+        result = simulator.run(transpiled_qc, shots=shots).result()
+        counts = result.get_counts()
+
+        expectation = 0
+        for key, count in counts.items():
+            val = int(key, 2) / (scale ** 2)
+            expectation += val * (count / shots)
+
+        total_expectation += expectation
+
+    distance = np.sqrt(total_expectation)
     print(f"Distance: {distance}")
     return distance
 
@@ -200,6 +342,40 @@ def k_means(data, k):
         cluster_labels[mask] = mode(labels[mask])[0]  # Assign most frequent true label
 
     return labels, centroids
+
+
+def hungarian_cluster_mapping(y_true, y_pred):
+    """
+    Uses Hungarian algorithm to find optimal 1-to-1 mapping
+    between cluster labels and ground-truth labels.
+    """
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    # get unique labels
+    true_labels = np.unique(y_true)
+    pred_labels = np.unique(y_pred)
+
+    # build cost matrix (negative overlap for maximization)
+    cost_matrix = np.zeros((len(pred_labels), len(true_labels)))
+
+    for i, p in enumerate(pred_labels):
+        for j, t in enumerate(true_labels):
+            cost_matrix[i, j] = -np.sum((y_pred == p) & (y_true == t))
+
+    # Hungarian algorithm (minimize cost → maximize correct matches)
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    # create mapping
+    mapping = {pred_labels[row]: true_labels[col] for row, col in zip(row_ind, col_ind)}
+
+    # relabel predictions
+    new_labels = np.array([mapping[label] for label in y_pred])
+
+    return new_labels, mapping
+
+
 def generate_blobs():
     """Generate synthetic blobs(blobs) data for clustering."""
     data, ground_cluster = make_blobs(n_samples=27, n_features=3, cluster_std=1.0, random_state=42)
@@ -227,6 +403,19 @@ def generate_aniso():
     return data, ground_cluster
 
 
+def generate_breast_cancer():
+    """Generate Breast Cancer dataset for clustering."""
+
+    # Load dataset
+    dataset = load_breast_cancer()
+    points = dataset.data  # shape (569, 30)
+    targets = dataset.target  # 0 = malignant, 1 = benign
+
+    reduced_points = PCA(n_components=4).fit_transform(points)
+
+    return reduced_points, targets
+
+
 def generate_iris():
     dataset = load_iris()
     data = dataset.data
@@ -249,39 +438,55 @@ def noisy_iris():
     noisy_data = data +noise
     return noisy_data, targets
 
-
 def evaluate_qkmeans(data, labels, centroids, ground_truth=None, kmeans_labels=None,
-                     iteration_sims=None, iterations=None, v_measure = True):
+                     iteration_sims=None, iterations=None, v_measure=True):
     """evaluate the qkmeans alg with N_ite, avg_sim, sil, sse, v_measure """
 
     measurements = {}
 
-    #ite
+    # ite
     measurements['N_ite'] = iterations
 
-    #avg_sim
+    # avg_sim
     if iteration_sims is not None:
-        avg_sim = float(iteration_sims/iterations)
+        avg_sim = float(iteration_sims / iterations)
         measurements['avg_sim'] = avg_sim
     else:
         measurements['avg_sim'] = None
 
-    #sse
+    # sse
     sse = float(np.sum([np.linalg.norm(data[i] - centroids[labels[i]]) ** 2 for i in range(len(data))]))
     measurements['sse'] = sse
 
-    #sil
+    # sil
     sil = float(silhouette_score(data, labels))
     measurements['sil'] = sil
 
     if v_measure:
-    #v_measure
+        # v_measure
         if ground_truth is not None:
             vm = float(v_measure_score(ground_truth, labels))
             measurements['vm'] = vm
         else:
             measurements['vm'] = None
 
+    # Davies-Bouldin Index (DBI)
+    measurements['dbi'] = float(davies_bouldin_score(data, labels))
+
+    if ground_truth is not None:
+        # Adjusted Rand Index (ARI)
+        measurements['ari'] = float(adjusted_rand_score(ground_truth, labels))
+
+        # Normalized Mutual Information (NMI)
+        measurements['nmi'] = float(normalized_mutual_info_score(ground_truth, labels))
+
+        measurements['ami'] = float(adjusted_mutual_info_score(ground_truth, labels))
+
+        measurements['hom'] = float(homogeneity_score(ground_truth, labels))
+
+        measurements['comp'] = float(completeness_score(ground_truth, labels))
+
+        # V-measure
 
     return measurements
 
@@ -312,12 +517,14 @@ def test_qk_means():
     from evaluation import evaluate_algorithms_
     """Test quantum k-means algorithm"""
     data_sets = {
-        'iris':generate_iris(),
+        #'breast cancer': generate_breast_cancer(),
+        # 'iris':generate_iris(),
         'wine':generate_wine(),
-        'blobs': generate_blobs(),
-        'moon': generate_moons(),
-         'aniso': generate_aniso(),
-        'iris': generate_iris(),
+        #'blobs': generate_blobs(),
+        # 'moon': generate_moons(),
+        #  'aniso': generate_aniso(),
+         
+         #'iris': generate_iris(),
     }
     scaler = StandardScaler()
     normalizer = Normalizer(norm='max')
@@ -332,7 +539,13 @@ def test_qk_means():
 
         print('evaluations for dataset '+dataset_name)
         print(evaluations)
-        evaluate_algorithms_(dataset_name,kmean_labels,label_list, ground_truth)
+        aligned_kmeans, km_map = hungarian_cluster_mapping(ground_truth, kmean_labels)
+        aligned_qkmeans, qkm_map = hungarian_cluster_mapping(ground_truth, label_list)
+
+        print("KMeans accuracy (Hungarian):", accuracy_score(ground_truth, aligned_kmeans))
+        print("QKMeans accuracy (Hungarian):", accuracy_score(ground_truth, aligned_qkmeans))
+
+        evaluate_algorithms_(dataset_name, aligned_kmeans, aligned_qkmeans, ground_truth)
         visualize_clusters(data_points, label_list, centroids, dataset_name)
 
 

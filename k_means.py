@@ -1,9 +1,9 @@
 import numpy as np
 from sklearn.datasets import make_blobs, make_moons, load_iris, load_diabetes, load_wine, load_breast_cancer
 from sklearn.preprocessing import Normalizer, StandardScaler
+from sklearn.cluster import KMeans  # Added
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix,precision_score, recall_score, f1_score, accuracy_score,classification_report
-
 
 from sklearn.metrics import (
     v_measure_score,
@@ -20,87 +20,33 @@ from sklearn.metrics import (
 from sklearn.decomposition import PCA
 from scipy.optimize import linear_sum_assignment
 import time
-from evaluation import evaluate_algorithms_
-
-def init_centroids(data, k):
-    centroids = []
-
-    first = data[np.random.choice(data.shape[0], replace=False)]
-    centroids.append(first)
-
-    for _ in range(k - 1):
-        dists = np.min([np.linalg.norm(data - c, axis=1) for c in centroids], axis=0)
-        probs = dists ** 2 / np.sum(dists ** 2)
-        centroids.append(data[np.random.choice(data.shape[0], p=probs)])
-
-    return np.array(centroids)
-
+# from evaluation import evaluate_algorithms_ # Ensure this is in your path
 
 # =========================================================
-# KMEANS
+# WRAPPER FOR SKLEARN KMEANS
 # =========================================================
-def k_means(data, k, max_iters=10, tol=1e-4, ground_truth=None):
-    np.random.seed(42)
-
-    centroids = init_centroids(data, k)
-    prev_centroids = centroids.copy()
-
-    labels = np.zeros(data.shape[0], dtype=int)
-
-    iteration_ari = []
-
-    for ite in range(max_iters):
-
-        # -------------------------
-        # Assignment step
-        # -------------------------
-        for i in range(data.shape[0]):
-
-            theta_record = 2 * np.arcsin(np.clip(data[i], -1, 1))
-            theta_centroids = 2 * np.arcsin(np.clip(centroids, -1, 1))
-
-            avg_overlap = np.mean(
-                np.cos((theta_record + theta_centroids) / 4),
-                axis=1
-            )
-
-            distances = np.sqrt(2 - 2 * avg_overlap)
-            labels[i] = np.argmin(distances)
-
-        # -------------------------
-        # Update step
-        # -------------------------
-        for j in range(k):
-            points = data[labels == j]
-            if len(points) > 0:
-                centroids[j] = points.mean(axis=0)
-
-        # -------------------------
-        # tracking
-        # -------------------------
-        if ground_truth is not None:
-            iteration_ari.append(adjusted_rand_score(labels, ground_truth))
-
-        # convergence check
-        if np.linalg.norm(centroids - prev_centroids) < tol:
-            break
-
-        prev_centroids = centroids.copy()
-
-    return labels.astype(int), centroids, ite + 1, iteration_ari
-
+def k_means_sklearn(data, k, max_iters=300, ground_truth=None):
+    # Initialize sklearn KMeans
+    # n_init=1 and random_state=42 to match your previous setup consistency
+    kmeans = KMeans(n_clusters=k, max_iter=max_iters, n_init=1, random_state=42)
+    
+    # Fit the model
+    kmeans.fit(data)
+    
+    labels = kmeans.labels_
+    centroids = kmeans.cluster_centers_
+    iters = kmeans.n_iter_
+    
+    return labels, centroids, iters
 
 # =========================================================
 # HUNGARIAN MAPPING
 # =========================================================
 def hungarian_cluster_mapping(y_true, y_pred):
-
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-
     true_labels = np.unique(y_true)
     pred_labels = np.unique(y_pred)
-
     cost = np.zeros((len(pred_labels), len(true_labels)))
 
     for i, p in enumerate(pred_labels):
@@ -108,41 +54,29 @@ def hungarian_cluster_mapping(y_true, y_pred):
             cost[i, j] = -np.sum((y_pred == p) & (y_true == t))
 
     row_ind, col_ind = linear_sum_assignment(cost)
-
     mapping = {pred_labels[i]: true_labels[j] for i, j in zip(row_ind, col_ind)}
-
     new_labels = np.array([mapping[l] for l in y_pred])
 
     return new_labels, mapping
 
-
-# =========================================================
-# FIX 1: REORDER CENTROIDS AFTER HUNGARIAN
-# =========================================================
 def reorder_centroids(centroids, mapping):
     new_centroids = np.zeros_like(centroids)
-
     for old_label, new_label in mapping.items():
         new_centroids[new_label] = centroids[old_label]
-
     return new_centroids
 
-
 # =========================================================
-# METRICS
+# METRICS (Updated to remove avg_sim)
 # =========================================================
-def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
-                    iteration_sims=None, iterations=None):
-
+def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None, iterations=None):
     m = {}
 
-    # SSE
+    # SSE (using sklearn's centers)
     m['sse'] = float(np.sum([
         np.linalg.norm(data[i] - centroids[labels[i]]) ** 2
         for i in range(len(data))
     ]))
 
-    # FIX 3: safe silhouette
     if len(np.unique(labels)) > 1:
         m['sil'] = float(silhouette_score(data, labels))
     else:
@@ -152,7 +86,6 @@ def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
 
     if iterations:
         m['N_ite'] = iterations
-
 
     if ground_truth is not None:
         m['ari'] = float(adjusted_rand_score(ground_truth, labels))
@@ -169,44 +102,41 @@ def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
 
     return m
 
-
 # =========================================================
-# DATASETS
+# DATASET GENERATORS (Kept same)
 # =========================================================
 def generate_blobs():
     data, ground = make_blobs(n_samples=800, n_features=4, cluster_std=1.0, random_state=42)
     return data, ground
 
-
 def generate_moons():
-    data, ground = make_moons(n_samples=800, noise=1.2, random_state=42)
+    data, ground = make_moons(n_samples=800, noise=0.2, random_state=42) # reduced noise for better Kmeans testing
     return data, ground
-
 
 def generate_iris():
     d = load_iris()
     return d.data, d.target
 
-
 def generate_breast_cancer():
     d = load_breast_cancer()
     return PCA(n_components=4).fit_transform(d.data), d.target
-
 
 def generate_wine():
     d = load_wine()
     return PCA(n_components=4).fit_transform(d.data), d.target
 
-
 def generate_diabetes():
     d = load_diabetes()
     return PCA(n_components=3).fit_transform(d.data), d.target
-
 
 def noisy_iris():
     d = load_iris()
     noise = np.random.normal(0, 0.5, d.data.shape)
     return d.data + noise, d.target
+
+# =========================================================
+# TEST (Updated)
+# =========================================================
 
 
 from math import sqrt
@@ -242,59 +172,52 @@ def average_dicts(dict_list):
         results[k] = {"mean": mean, "std": std}
 
     return results
-# =========================================================
-# TEST
-# =========================================================
 
 def test_k_means():
-
     data_sets = {
         # 'breast cancer': generate_breast_cancer(),
         # 'blobs': generate_blobs(),
         # 'moon': generate_moons(),
         # 'wine': generate_wine(),
-        # 'iris': generate_iris(),
-        'noisy iris': noisy_iris()
+        'iris': generate_iris(),
+         #'noisy iris': noisy_iris()
     }
-    list_ = []
+    list_=[]
     scaler = StandardScaler()
     normalizer = Normalizer(norm='max')
     for i in range(1):
         for name, (X, y) in data_sets.items():
-
             X = scaler.fit_transform(X)
             X = normalizer.fit_transform(X)
 
             k = len(np.unique(y))
 
-            labels, centroids, iters, sim = k_means(X, k, ground_truth=y)
+            # Using sklearn version
+            labels, centroids, iters = k_means_sklearn(X, k, ground_truth=y)
 
-            # FIX 1 applied
+            # Apply Hungarian mapping for centroid alignment
             aligned, mapping = hungarian_cluster_mapping(y, labels)
             centroids = reorder_centroids(centroids, mapping)
 
-            print("\nDataset:", name)
-            # print("ARI:", adjusted_rand_score(y, labels))
+            print(f"\nDataset: {name}")
+            #print(f"Final iterations: {iters}")
 
             metrics = evaluate_kmeans(
                 X,
                 labels,
-                centroids,aligned,
+                centroids,
+                aligned,
                 ground_truth=y,
-                iteration_sims=sim,
                 iterations=iters
             )
             print(metrics)
-            #list_.append(metrics)
-            #evaluate_algorithms_(name, aligned, aligned, y)
+            list_.append(metrics)
     #print(average_dicts(list_))
             
-# =========================================================
-# RUN
-# =========================================================
+            # evaluate_algorithms_(name, aligned, aligned, y)
+
 if __name__ == "__main__":
     start = time.time()
     test_k_means()
     end = time.time()
-
-    print("\nTime:", end - start)
+    print("\nTotal Execution Time:", end - start)
