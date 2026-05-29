@@ -4,7 +4,7 @@ This repository contains the Python source code accompanying the research paper:
 
 **Title**: *Quantum k-Means Clustering Using Hadamard-Test-Based Similarity Estimation*  
 **Authors**: MohammadHadi Allayean, Shahin Torabi, Mehdi Allayean  
-**Date**: 2025  
+**Date**: 2026  
 
 ---
 
