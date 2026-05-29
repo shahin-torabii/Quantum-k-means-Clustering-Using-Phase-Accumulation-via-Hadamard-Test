@@ -2,11 +2,10 @@ import numpy as np
 from sklearn.datasets import make_blobs, make_moons, load_iris, load_diabetes, load_wine, load_breast_cancer
 from sklearn.preprocessing import Normalizer, StandardScaler
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix,precision_score, recall_score, f1_score, accuracy_score,classification_report
+from sklearn.metrics import confusion_matrix,precision_score, recall_score, f1_score, accuracy_score
 
 
 from sklearn.metrics import (
-    v_measure_score,
     silhouette_score,
     adjusted_rand_score,
     normalized_mutual_info_score,
@@ -20,7 +19,7 @@ from sklearn.metrics import (
 from sklearn.decomposition import PCA
 from scipy.optimize import linear_sum_assignment
 import time
-from evaluation import evaluate_algorithms_
+import seaborn as sns
 
 def init_centroids(data, k):
     centroids = []
@@ -36,52 +35,45 @@ def init_centroids(data, k):
     return np.array(centroids)
 
 
-# =========================================================
-# KMEANS
-# =========================================================
 def k_means(data, k, max_iters=10, tol=1e-4, ground_truth=None):
     np.random.seed(42)
+
+    # Precompute angles for data
 
     centroids = init_centroids(data, k)
     prev_centroids = centroids.copy()
 
     labels = np.zeros(data.shape[0], dtype=int)
-
     iteration_ari = []
 
     for ite in range(max_iters):
 
-        # -------------------------
-        # Assignment step
-        # -------------------------
-        for i in range(data.shape[0]):
+        # Precompute centroid angles
 
-            theta_record = 2 * np.arcsin(np.clip(data[i], -1, 1))
-            theta_centroids = 2 * np.arcsin(np.clip(centroids, -1, 1))
+        for i, record  in enumerate(data):
+            distances = []
+            theta_data = 2 * np.arcsin(np.clip(record, -1, 1))
 
-            avg_overlap = np.mean(
-                np.cos((theta_record + theta_centroids) / 4),
-                axis=1
-            )
+            for centroid in centroids:
+                theta_centroids = 2 * np.arcsin(np.clip(centroid, -1, 1))
+                avg_overlap = np.mean(
+                    np.cos((theta_data - theta_centroids) / 4)
+                )
 
-            distances = np.sqrt(2 - 2 * avg_overlap)
+                distance = np.sqrt(2 - 2 * avg_overlap)
+                distances.append(distance)
+
             labels[i] = np.argmin(distances)
 
-        # -------------------------
         # Update step
-        # -------------------------
         for j in range(k):
             points = data[labels == j]
             if len(points) > 0:
-                centroids[j] = points.mean(axis=0)
+                centroids[j] = np.clip(points.mean(axis=0), -1, 1)
 
-        # -------------------------
-        # tracking
-        # -------------------------
         if ground_truth is not None:
             iteration_ari.append(adjusted_rand_score(labels, ground_truth))
 
-        # convergence check
         if np.linalg.norm(centroids - prev_centroids) < tol:
             break
 
@@ -89,10 +81,6 @@ def k_means(data, k, max_iters=10, tol=1e-4, ground_truth=None):
 
     return labels.astype(int), centroids, ite + 1, iteration_ari
 
-
-# =========================================================
-# HUNGARIAN MAPPING
-# =========================================================
 def hungarian_cluster_mapping(y_true, y_pred):
 
     y_true = np.asarray(y_true)
@@ -116,22 +104,32 @@ def hungarian_cluster_mapping(y_true, y_pred):
     return new_labels, mapping
 
 
-# =========================================================
-# FIX 1: REORDER CENTROIDS AFTER HUNGARIAN
-# =========================================================
-def reorder_centroids(centroids, mapping):
-    new_centroids = np.zeros_like(centroids)
+def visualize_clusters(data, labels, centroids, dataset_name):
+    """Visualize clustering results in 3D with each centroid matching its cluster color."""
 
-    for old_label, new_label in mapping.items():
-        new_centroids[new_label] = centroids[old_label]
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
 
-    return new_centroids
+    unique_labels = np.unique(labels)
+    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_labels)))  # Generate colormap
+
+    for cluster_idx, color in zip(unique_labels, colors):
+        cluster_points = data[labels == cluster_idx]
+        ax.scatter(cluster_points[:, 0], cluster_points[:, 1],cluster_points[:, 2],
+                   color=color, alpha=0.5, label=f"Cluster {cluster_idx}")
+
+        ax.scatter(centroids[cluster_idx][0], centroids[cluster_idx][1], centroids[cluster_idx][2],
+                   color=color, edgecolor='black', marker='X', s=200, label=f"Centroid {cluster_idx}")
+
+    ax.set_title(f"Q k-Means Clustering ({dataset_name})")
+
+    plt.legend()
+    plt.show()
 
 
-# =========================================================
-# METRICS
-# =========================================================
-def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
+
+
+def evaluate_kmeans(dataset_name, data, labels, centroids, aligned,ground_truth=None,
                     iteration_sims=None, iterations=None):
 
     m = {}
@@ -142,7 +140,7 @@ def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
         for i in range(len(data))
     ]))
 
-    # FIX 3: safe silhouette
+    #sil
     if len(np.unique(labels)) > 1:
         m['sil'] = float(silhouette_score(data, labels))
     else:
@@ -166,13 +164,31 @@ def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None,
         m['recall']= recall_score(ground_truth, aligned, average='weighted')
         m['f1'] = f1_score(ground_truth, aligned, average='weighted')
         m['accuracy'] = accuracy_score(ground_truth, aligned)
-
+        show_conf(dataset_name, ground_truth, labels)
     return m
 
 
-# =========================================================
-# DATASETS
-# =========================================================
+def show_conf(dataset_name, ground_truth, labels):
+
+
+    cm = confusion_matrix(ground_truth,labels)
+    class_labels = [f"Cluster {i}" for i in range(len(cm))]
+
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm,
+                annot=True,
+                fmt='g',
+                cmap='Blues',
+                xticklabels=class_labels,
+                yticklabels=class_labels)
+    plt.title(f"Confusion Matrix for {dataset_name}", fontsize=16)
+    plt.xlabel("Predicted Labels", fontsize=14)
+    plt.ylabel("True Labels", fontsize=14)
+    #plt.show()
+
+
+
 def generate_blobs():
     data, ground = make_blobs(n_samples=800, n_features=4, cluster_std=1.0, random_state=42)
     return data, ground
@@ -198,10 +214,6 @@ def generate_wine():
     return PCA(n_components=4).fit_transform(d.data), d.target
 
 
-def generate_diabetes():
-    d = load_diabetes()
-    return PCA(n_components=3).fit_transform(d.data), d.target
-
 
 def noisy_iris():
     d = load_iris()
@@ -219,64 +231,60 @@ def average_dicts(dict_list):
 
     n = len(dict_list)
 
-    # For sums and sums of squares
     sums = defaultdict(float)
     sums_sq = defaultdict(float)
 
-    # Accumulate
+
     for d in dict_list:
         for k, v in d.items():
             sums[k] += v
             sums_sq[k] += v * v
 
-    # Compute mean and std
+
     results = {}
     for k in sums:
         mean = sums[k] / n
         variance = (sums_sq[k] / n) - (mean * mean)
 
-        # numerical stability fix
+
         variance = max(0.0, variance)
 
         std = sqrt(variance)
         results[k] = {"mean": mean, "std": std}
 
     return results
-# =========================================================
-# TEST
-# =========================================================
 
 def test_k_means():
 
     data_sets = {
-        # 'breast cancer': generate_breast_cancer(),
-        # 'blobs': generate_blobs(),
-        # 'moon': generate_moons(),
-        # 'wine': generate_wine(),
-        # 'iris': generate_iris(),
+        'breast cancer': generate_breast_cancer(),
+        'blobs': generate_blobs(),
+        'moon': generate_moons(),
+        'wine': generate_wine(),
+        'iris': generate_iris(),
         'noisy iris': noisy_iris()
     }
     list_ = []
     scaler = StandardScaler()
     normalizer = Normalizer(norm='max')
-    for i in range(1):
-        for name, (X, y) in data_sets.items():
+    for name, (X, y) in data_sets.items():
+        X = scaler.fit_transform(X)
+        X = normalizer.fit_transform(X)
 
-            X = scaler.fit_transform(X)
-            X = normalizer.fit_transform(X)
+        for i in range(10):
 
             k = len(np.unique(y))
 
             labels, centroids, iters, sim = k_means(X, k, ground_truth=y)
 
-            # FIX 1 applied
-            aligned, mapping = hungarian_cluster_mapping(y, labels)
-            centroids = reorder_centroids(centroids, mapping)
 
-            print("\nDataset:", name)
-            # print("ARI:", adjusted_rand_score(y, labels))
+            aligned, mapping = hungarian_cluster_mapping(y, labels)
+
+
+            #print("ARI:", adjusted_rand_score(y, labels))
 
             metrics = evaluate_kmeans(
+                name,
                 X,
                 labels,
                 centroids,aligned,
@@ -284,14 +292,13 @@ def test_k_means():
                 iteration_sims=sim,
                 iterations=iters
             )
-            print(metrics)
-            #list_.append(metrics)
-            #evaluate_algorithms_(name, aligned, aligned, y)
-    #print(average_dicts(list_))
-            
-# =========================================================
-# RUN
-# =========================================================
+            #visualize_clusters(X, labels,centroids, name)
+            #print(metrics)
+            list_.append(metrics)
+        print("\nDataset:", name)
+        print(average_dicts(list_))
+        print("\n\n\n")
+
 if __name__ == "__main__":
     start = time.time()
     test_k_means()

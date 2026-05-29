@@ -1,7 +1,7 @@
 import numpy as np
 from sklearn.datasets import make_blobs, make_moons, load_iris, load_diabetes, load_wine, load_breast_cancer
 from sklearn.preprocessing import Normalizer, StandardScaler
-from sklearn.cluster import KMeans  # Added
+from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix,precision_score, recall_score, f1_score, accuracy_score,classification_report
 
@@ -16,21 +16,17 @@ from sklearn.metrics import (
     completeness_score,
     fowlkes_mallows_score
 )
+import seaborn as sns
 
 from sklearn.decomposition import PCA
 from scipy.optimize import linear_sum_assignment
 import time
-# from evaluation import evaluate_algorithms_ # Ensure this is in your path
 
-# =========================================================
-# WRAPPER FOR SKLEARN KMEANS
-# =========================================================
-def k_means_sklearn(data, k, max_iters=300, ground_truth=None):
-    # Initialize sklearn KMeans
-    # n_init=1 and random_state=42 to match your previous setup consistency
-    kmeans = KMeans(n_clusters=k, max_iter=max_iters, n_init=1, random_state=42)
+def k_means_sklearn(data, k, max_iters=10, ground_truth=None):
+
+    kmeans = KMeans(n_clusters=k, max_iter=max_iters, random_state=42)
     
-    # Fit the model
+
     kmeans.fit(data)
     
     labels = kmeans.labels_
@@ -39,9 +35,6 @@ def k_means_sklearn(data, k, max_iters=300, ground_truth=None):
     
     return labels, centroids, iters
 
-# =========================================================
-# HUNGARIAN MAPPING
-# =========================================================
 def hungarian_cluster_mapping(y_true, y_pred):
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -59,19 +52,36 @@ def hungarian_cluster_mapping(y_true, y_pred):
 
     return new_labels, mapping
 
-def reorder_centroids(centroids, mapping):
-    new_centroids = np.zeros_like(centroids)
-    for old_label, new_label in mapping.items():
-        new_centroids[new_label] = centroids[old_label]
-    return new_centroids
 
-# =========================================================
-# METRICS (Updated to remove avg_sim)
-# =========================================================
-def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None, iterations=None):
+def visualize_clusters(data, labels, centroids, dataset_name):
+    """Visualize clustering results in 3D with each centroid matching its cluster color."""
+
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    unique_labels = np.unique(labels)
+    colors = plt.cm.Set1.colors
+
+    for cluster_idx in unique_labels:
+        cluster_points = data[labels == cluster_idx]
+        color = colors[cluster_idx%10]
+        ax.scatter(cluster_points[:, 0], cluster_points[:, 1],
+                   color=color, alpha=1,s = 30, label=f"Cluster {cluster_idx}")
+
+        ax.scatter(centroids[cluster_idx][0], centroids[cluster_idx][1],
+                   color=color, edgecolor='black', marker='X', s=200, label=f"Centroid {cluster_idx}")
+
+    ax.set_title(f"K-Means Clustering ({dataset_name})")
+
+    plt.legend()
+    plt.show()
+
+
+
+
+def evaluate_kmeans(dataset, data, labels, centroids, aligned,ground_truth=None, iterations=None):
     m = {}
 
-    # SSE (using sklearn's centers)
     m['sse'] = float(np.sum([
         np.linalg.norm(data[i] - centroids[labels[i]]) ** 2
         for i in range(len(data))
@@ -100,17 +110,33 @@ def evaluate_kmeans(data, labels, centroids, aligned,ground_truth=None, iteratio
         m['f1'] = f1_score(ground_truth, aligned, average='weighted')
         m['accuracy'] = accuracy_score(ground_truth, aligned)
 
+        show_conf(dataset, ground_truth, labels)
     return m
 
-# =========================================================
-# DATASET GENERATORS (Kept same)
-# =========================================================
+
+def show_conf(dataset_name, ground_truth, labels):
+    cm = confusion_matrix(ground_truth, labels)
+    class_labels = [f"Cluster {i}" for i in range(len(cm))]
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm,
+                annot=True,
+                fmt='g',
+                cmap='Blues',
+                xticklabels=class_labels,
+                yticklabels=class_labels)
+    plt.title(f"Confusion Matrix for {dataset_name}", fontsize=16)
+    plt.xlabel("Predicted Labels", fontsize=14)
+    plt.ylabel("True Labels", fontsize=14)
+    # plt.show()
+
+
 def generate_blobs():
     data, ground = make_blobs(n_samples=800, n_features=4, cluster_std=1.0, random_state=42)
     return data, ground
 
 def generate_moons():
-    data, ground = make_moons(n_samples=800, noise=0.2, random_state=42) # reduced noise for better Kmeans testing
+    data, ground = make_moons(n_samples=800, noise=1.2, random_state=42) # reduced noise for better Kmeans testing
     return data, ground
 
 def generate_iris():
@@ -125,19 +151,10 @@ def generate_wine():
     d = load_wine()
     return PCA(n_components=4).fit_transform(d.data), d.target
 
-def generate_diabetes():
-    d = load_diabetes()
-    return PCA(n_components=3).fit_transform(d.data), d.target
-
 def noisy_iris():
     d = load_iris()
     noise = np.random.normal(0, 0.5, d.data.shape)
     return d.data + noise, d.target
-
-# =========================================================
-# TEST (Updated)
-# =========================================================
-
 
 from math import sqrt
 from collections import defaultdict
@@ -149,23 +166,19 @@ def average_dicts(dict_list):
 
     n = len(dict_list)
 
-    # For sums and sums of squares
     sums = defaultdict(float)
     sums_sq = defaultdict(float)
 
-    # Accumulate
     for d in dict_list:
         for k, v in d.items():
             sums[k] += v
             sums_sq[k] += v * v
 
-    # Compute mean and std
     results = {}
     for k in sums:
         mean = sums[k] / n
         variance = (sums_sq[k] / n) - (mean * mean)
 
-        # numerical stability fix
         variance = max(0.0, variance)
 
         std = sqrt(variance)
@@ -175,34 +188,35 @@ def average_dicts(dict_list):
 
 def test_k_means():
     data_sets = {
-        # 'breast cancer': generate_breast_cancer(),
-        # 'blobs': generate_blobs(),
-        # 'moon': generate_moons(),
-        # 'wine': generate_wine(),
-        'iris': generate_iris(),
-         #'noisy iris': noisy_iris()
+        'breast cancer': generate_breast_cancer(),
+         'blobs': generate_blobs(),
+        'moon': generate_moons(),
+        'wine': generate_wine(),
+         'iris': generate_iris(),
+        'noisy iris': noisy_iris()
     }
-    list_=[]
     scaler = StandardScaler()
     normalizer = Normalizer(norm='max')
-    for i in range(1):
-        for name, (X, y) in data_sets.items():
-            X = scaler.fit_transform(X)
-            X = normalizer.fit_transform(X)
+
+    for name, (X, y) in data_sets.items():
+        list_=[]
+
+        X = scaler.fit_transform(X)
+        X = normalizer.fit_transform(X)
+        for i in range(1):
+
 
             k = len(np.unique(y))
 
-            # Using sklearn version
             labels, centroids, iters = k_means_sklearn(X, k, ground_truth=y)
 
-            # Apply Hungarian mapping for centroid alignment
             aligned, mapping = hungarian_cluster_mapping(y, labels)
-            centroids = reorder_centroids(centroids, mapping)
 
-            print(f"\nDataset: {name}")
+            #print(f"\nDataset: {name}")
             #print(f"Final iterations: {iters}")
 
             metrics = evaluate_kmeans(
+                name,
                 X,
                 labels,
                 centroids,
@@ -210,11 +224,15 @@ def test_k_means():
                 ground_truth=y,
                 iterations=iters
             )
-            print(metrics)
+            visualize_clusters(X, labels,centroids, name)
+            # print(metrics)
+            # print(f"experiment {i}\n\n")
             list_.append(metrics)
-    #print(average_dicts(list_))
-            
-            # evaluate_algorithms_(name, aligned, aligned, y)
+
+        print(name)
+        print(average_dicts(list_))
+        print("\n\n\n\n\n\n")
+
 
 if __name__ == "__main__":
     start = time.time()
